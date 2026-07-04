@@ -1,0 +1,144 @@
+import requests
+import time
+import gspread
+from google.oauth2.service_account import Credentials
+
+# ─── CONFIG ──────────────────────────────────────────────────────────────────
+API_KEY = "AIzaSyCN2U34_vKPYtsfRKBG0Zes8p-9qxvXNEc"
+
+# Your existing service account JSON (same one used for HYPD sheets)
+SERVICE_ACCOUNT_FILE = r"C:\Users\HYPD User\Desktop\Python\green-api-496402-b9ca65ef9c7d.json"
+
+# Google Sheet URL - paste your sheet link here
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1QrASQg4oOkh6YS7-oQFO3K1-0RMoycGFFRZ3TFjE__g/edit?gid=0#gid=0"
+
+# Sheet tab names
+INPUT_TAB  = "Input"   # Tab where you paste Video IDs (Column A)
+OUTPUT_TAB = "Output"  # Tab where results will be written
+
+# ─── CONNECT TO GOOGLE SHEET ─────────────────────────────────────────────────
+def connect_sheet():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+    client = gspread.authorize(creds)
+    sheet = client.open_by_url(SHEET_URL)
+    return sheet
+
+# ─── READ VIDEO IDs FROM INPUT TAB ───────────────────────────────────────────
+def read_video_ids(sheet):
+    worksheet = sheet.worksheet(INPUT_TAB)
+    all_values = worksheet.col_values(1)  # Column A
+    
+    # Skip header if present
+    ids = [v.strip() for v in all_values if v.strip() and v.strip().lower() != "video_id"]
+    
+    # Remove duplicates while preserving order
+    unique_ids = list(dict.fromkeys(ids))
+    print(f"📋 Found {len(ids)} video IDs ({len(unique_ids)} unique)")
+    return unique_ids
+
+# ─── FETCH YOUTUBE STATS ─────────────────────────────────────────────────────
+def get_video_stats(video_ids):
+    results = {}
+    
+    for i in range(0, len(video_ids), 50):  # API allows 50 at once
+        chunk = video_ids[i:i+50]
+        
+        url = "https://www.googleapis.com/youtube/v3/videos"
+        params = {
+            "part": "snippet,statistics",
+            "id": ",".join(chunk),
+            "key": API_KEY
+        }
+        
+        response = requests.get(url, params=params)
+        data = response.json()
+        
+        if "error" in data:
+            print(f"❌ YouTube API Error: {data['error']['message']}")
+            break
+        
+        for item in data.get("items", []):
+            vid_id = item["id"]
+            snippet = item.get("snippet", {})
+            stats   = item.get("statistics", {})
+            
+            results[vid_id] = {
+                "title":         snippet.get("title", "N/A"),
+                "channel":       snippet.get("channelTitle", "N/A"),
+                "published_at":  snippet.get("publishedAt", "N/A")[:10],
+                "views":         int(stats.get("viewCount", 0)),
+                "likes":         int(stats.get("likeCount", 0)),
+                "comment_count": int(stats.get("commentCount", 0)),
+                "url":           f"https://www.youtube.com/watch?v={vid_id}"
+            }
+        
+        time.sleep(0.5)
+    
+    return results
+
+# ─── WRITE RESULTS TO OUTPUT TAB ─────────────────────────────────────────────
+def write_results(sheet, video_ids, stats):
+    try:
+        output_ws = sheet.worksheet(OUTPUT_TAB)
+        output_ws.clear()
+    except:
+        output_ws = sheet.add_worksheet(title=OUTPUT_TAB, rows=500, cols=10)
+    
+    # Header row
+    headers = ["Video ID", "Title", "Channel", "Published Date",
+               "Views", "Likes", "Comments", "URL", "Status"]
+    
+    rows = [headers]
+    
+    for vid_id in video_ids:
+        if vid_id in stats:
+            s = stats[vid_id]
+            rows.append([
+                vid_id,
+                s["title"],
+                s["channel"],
+                s["published_at"],
+                s["views"],
+                s["likes"],
+                s["comment_count"],
+                s["url"],
+                "✅ Found"
+            ])
+        else:
+            rows.append([vid_id, "N/A", "N/A", "N/A", 0, 0, 0, "N/A", "❌ Not Found"])
+    
+    # Write all at once (faster)
+    output_ws.update("A1", rows)
+    
+    # Bold the header
+    output_ws.format("A1:I1", {"textFormat": {"bold": True}})
+    
+    print(f"✅ Written {len(rows)-1} rows to '{OUTPUT_TAB}' tab")
+
+# ─── MAIN ────────────────────────────────────────────────────────────────────
+def main():
+    print("🔗 Connecting to Google Sheet...")
+    sheet = connect_sheet()
+    
+    print("📥 Reading Video IDs from Input tab...")
+    video_ids = read_video_ids(sheet)
+    
+    if not video_ids:
+        print("⚠️  No video IDs found in Column A of Input tab!")
+        return
+    
+    print(f"📊 Fetching YouTube stats...")
+    stats = get_video_stats(video_ids)
+    print(f"✅ Got stats for {len(stats)} videos")
+    
+    print("📤 Writing results to Output tab...")
+    write_results(sheet, video_ids, stats)
+    
+    print("\n🎉 Done! Check your Google Sheet Output tab.")
+
+if __name__ == "__main__":
+    main()
